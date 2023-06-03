@@ -2,13 +2,20 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
+    thread,
+    time::Duration,
 };
+
+use rust_web_server::ThreadPool;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
+
+    //NOTE: We use ThreadPool::new to create a new thread pool with a configurable number of threads
+    let pool = ThreadPool::new(4);
     for stream in listener.incoming() {
         let stream = stream.unwrap();
-        handle_connection(stream);
+        pool.execute(|| handle_connection(stream));
     }
 }
 
@@ -22,6 +29,7 @@ fn handle_connection(mut stream: TcpStream) -> () {
     //stream of data whenever it sees a newline byte. To get each String, we map and unwrap each Result
     let request_line = buf_reader.lines().next().unwrap().unwrap();
     let (status_line, filename) = if request_line == "GET / HTTP/1.1" {
+        thread::sleep(Duration::from_secs(3)); //example delay in processing requests
         ("HTTP/1.1 200 OK", "hello.html")
     } else {
         ("HTTP/1.1 404 NOT FOUND", "404.html")
