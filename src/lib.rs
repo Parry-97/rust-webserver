@@ -10,13 +10,13 @@ use std::{
 #[derive(Debug)]
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Sender<Job>,
+    sender: Option<Sender<Job>>,
 }
 
 #[derive(Debug)]
 struct Worker {
     id: usize,
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 //NOTE: We’ll change Job from a struct to a type alias for a trait object that holds the type of closure that execute receives.
@@ -25,11 +25,21 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let handle = thread::spawn(move || loop {
-            let job = receiver.lock().unwrap().recv().unwrap();
-            println!("Worker {id} got a job; executing");
-            job();
+            match receiver.lock().unwrap().recv() {
+                Ok(job) => {
+                    println!("Worker {id} got a job; executing");
+                    job();
+                }
+                Err(_) => {
+                    println!("Worker {id} disconnected; shutting down.");
+                    break;
+                }
+            }
         });
-        Worker { id, handle }
+        Worker {
+            id,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -44,13 +54,6 @@ impl Display for PoolCreationError {
 }
 
 impl ThreadPool {
-    // fn build(size: usize) -> Result<ThreadPool, PoolCreationError> {
-    //     assert!(size > 0);
-    //     Ok(ThreadPool {
-    //         workers: Vec::with_capacity(size),
-    //     })
-    // }
-
     /// Create a new ThreadPool.
     ///
     /// The size is the number of threads in the pool.
@@ -68,7 +71,10 @@ impl ThreadPool {
             workers.push(Worker::new(n, Arc::clone(&receiver)));
         }
 
-        ThreadPool { workers, sender }
+        ThreadPool {
+            workers,
+            sender: Some(sender),
+        }
     }
 
     //NOTE: we decided our thread pool should have an interface similar to thread::spawn.
@@ -84,6 +90,27 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+        //WARN: Converts &Option<T> to a new Option<&T>
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        //NOTE: Dropping sender closes the channel, which indicates no more messages will be sent.
+        //When that happens, all the calls to recv that the workers do in the infinite loop will return an error.
+        drop(self.sender.take());
+
+        for worker in &mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+            //NOTE: we can call the 'take()' method on the Option to move the value out of the Some
+            //variant and leave a None variant in its place. In other words, a Worker that is
+            //running will have a Some variant in thread, and when we want to clean up a Worker,
+            //we’ll replace Some with None so the Worker doesn’t have a thread to run.
+
+            if let Some(handle) = worker.handle.take() {
+                handle.join().unwrap();
+            }
+        }
     }
 }
